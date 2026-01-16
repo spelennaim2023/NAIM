@@ -5,7 +5,8 @@ import { GoogleGenAI, Modality, LiveServerMessage, Type } from '@google/genai';
 
 // --- CONFIG & THEMES ---
 const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
-const VERSION = 'v4.4';
+const SEARCH_MODEL = 'gemini-3-flash-preview';
+const VERSION = 'v4.5';
 const FRAME_RATE = 1; 
 
 type ThemeColor = 'emerald' | 'cyan' | 'violet' | 'rose' | 'amber' | 'slate' | 'disco';
@@ -101,7 +102,14 @@ const ParticleBackground = ({ color }: { color: string }) => {
       requestAnimationFrame(animate);
     };
 
+    const handleResize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    window.addEventListener('resize', handleResize);
+
     animate();
+    return () => window.removeEventListener('resize', handleResize);
   }, [color]);
 
   return <canvas ref={canvasRef} className="fixed inset-0 z-[-1] pointer-events-none opacity-40" />;
@@ -179,7 +187,6 @@ const NAIMCharacter = ({
   const scale = baseScale + (pulse / 80) + (activeVolume * 0.5);
   const bodySize = multiplicity > 3 ? 'w-48 h-48' : (multiplicity > 1 ? 'w-64 h-64' : 'w-80 h-80');
 
-  // EMOTIONAL EYE RENDERING
   const renderEye = (side: 'L' | 'R') => {
     if (isSleeping || isBlinking) return <div className="w-[15%] h-[2%] bg-black/40 rounded-full transition-all duration-300" />;
 
@@ -276,12 +283,13 @@ const App = () => {
   const [isGhost, setIsGhost] = useState(false);
   const [isHologram, setIsHologram] = useState(false);
   const [timeDilation, setTimeDilation] = useState(1);
-  const [showCode, setShowCode] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [scaleFactor, setScaleFactor] = useState(1);
   const [multiplicity, setMultiplicity] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const [searchSources, setSearchSources] = useState<any[]>([]);
 
+  const aiRef = useRef<GoogleGenAI | null>(null);
   const audioCtxRef = useRef<{ input: AudioContext | null, output: AudioContext | null }>({ input: null, output: null });
   const streamRef = useRef<MediaStream | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
@@ -352,12 +360,37 @@ const App = () => {
     setIsActive(false); setIsSleeping(true); setIsSpeaking(false); setIsListening(false);
     setThemeColor('emerald'); setIsGlitching(false); setScaleFactor(1); setMultiplicity(1);
     setEnvironment('aurora'); setIsFlipped(false); setIsGhost(false); setIsHologram(false);
-    setTimeDilation(1); setMood('happy');
+    setTimeDilation(1); setMood('happy'); setSearchSources([]);
   }, []);
+
+  const performWebSearch = async (query: string) => {
+    if (!aiRef.current) return { text: "Error: AI not initialized", sources: [] };
+    try {
+      const response = await aiRef.current.models.generateContent({
+        model: SEARCH_MODEL,
+        contents: query,
+        config: {
+          tools: [{ googleSearch: {} }],
+        },
+      });
+      const text = response.text || "No relevant information found.";
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+      const sources = chunks.filter((c: any) => c.web).map((c: any) => ({
+        uri: c.web.uri,
+        title: c.web.title
+      }));
+      setSearchSources(prev => [...prev, ...sources]);
+      return { text, sources };
+    } catch (e) {
+      console.error("Search error:", e);
+      return { text: "Web search failed.", sources: [] };
+    }
+  };
 
   const startSession = async () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      aiRef.current = ai;
       const inputCtx = new AudioContext({ sampleRate: 16000 });
       const outputCtx = new AudioContext({ sampleRate: 24000 });
       audioCtxRef.current = { input: inputCtx, output: outputCtx };
@@ -373,6 +406,7 @@ const App = () => {
         { name: 'multiply_self', parameters: { type: Type.OBJECT, properties: { count: { type: Type.NUMBER } } } },
         { name: 'toggle_camera', parameters: { type: Type.OBJECT, properties: { active: { type: Type.BOOLEAN } } } },
         { name: 'set_ghost_mode', parameters: { type: Type.OBJECT, properties: { active: { type: Type.BOOLEAN } } } },
+        { name: 'perform_web_search', parameters: { type: Type.OBJECT, description: 'Get up to date info from Google Search', properties: { query: { type: Type.STRING, description: 'Search query' } }, required: ['query'] } },
       ];
 
       const sessionPromise = ai.live.connect({
@@ -389,15 +423,30 @@ const App = () => {
           onmessage: async (msg: LiveServerMessage) => {
             if (msg.toolCall) {
               for (const fc of msg.toolCall.functionCalls) {
-                if (fc.name === 'set_mood') {
+                if (fc.name === 'perform_web_search') {
+                  const query = fc.args.query as string;
+                  const result = await performWebSearch(query);
+                  sessionPromise.then(s => s.sendToolResponse({
+                    functionResponses: { id: fc.id, name: fc.name, response: { result: result.text } }
+                  }));
+                } else if (fc.name === 'set_mood') {
                   const map: any = { happy:'emerald', angry:'rose', curious:'violet', excited:'amber', cool:'cyan', disco:'disco', relaxed:'slate' };
                   setThemeColor(map[fc.args.mood as string] || 'emerald');
                   setMood(fc.args.mood as string);
-                } else if (fc.name === 'set_environment') setEnvironment(fc.args.env as Environment);
-                else if (fc.name === 'multiply_self') setMultiplicity(Math.max(1, Math.min(6, Number(fc.args.count))));
-                else if (fc.name === 'toggle_camera') toggleCamera(!!fc.args.active);
-                else if (fc.name === 'set_ghost_mode') setIsGhost(!!fc.args.active);
-                sessionPromise.then(s => s.sendToolResponse({ functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } } }));
+                  sessionPromise.then(s => s.sendToolResponse({ functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } } }));
+                } else if (fc.name === 'set_environment') {
+                  setEnvironment(fc.args.env as Environment);
+                  sessionPromise.then(s => s.sendToolResponse({ functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } } }));
+                } else if (fc.name === 'multiply_self') {
+                  setMultiplicity(Math.max(1, Math.min(6, Number(fc.args.count))));
+                  sessionPromise.then(s => s.sendToolResponse({ functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } } }));
+                } else if (fc.name === 'toggle_camera') {
+                  toggleCamera(!!fc.args.active);
+                  sessionPromise.then(s => s.sendToolResponse({ functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } } }));
+                } else if (fc.name === 'set_ghost_mode') {
+                  setIsGhost(!!fc.args.active);
+                  sessionPromise.then(s => s.sendToolResponse({ functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } } }));
+                }
               }
             }
             if (msg.serverContent?.inputTranscription) {
@@ -428,9 +477,10 @@ const App = () => {
           thinkingConfig: { thinkingBudget: 0 },
           tools: [{ functionDeclarations: functions }],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Fenrir' } } },
-          systemInstruction: `Je bent NAIM v4.4, de meest vloeibare AI ter wereld. Ontwikkeld door Naim Yavuz Çankaya (NCS).
-          GEDRAG: Hyper-expressief. Toon emoties (happy, angry, curious, excited) via de 'set_mood' tool.
-          Visuele feedback is key. Antwoord direct en vlijmscherp.`,
+          systemInstruction: `Je bent NAIM v4.5, de meest vloeibare AI ter wereld. Ontwikkeld door Naim Yavuz Çankaya (NCS).
+          GEDRAG: Hyper-expressief. Toon emoties via de 'set_mood' tool.
+          SEARCH: Gebruik de 'perform_web_search' tool als je actuele informatie nodig hebt over nieuws, evenementen of feiten die je niet zeker weet.
+          Antwoord altijd behulpzaam en direct.`,
         }
       });
     } catch (e) { setError('Access Denied.'); cleanup(); }
@@ -480,6 +530,21 @@ const App = () => {
         </div>
       )}
 
+      {/* SEARCH SOURCES OVERLAY */}
+      {searchSources.length > 0 && !isSleeping && (
+        <div className="fixed left-8 top-1/2 -translate-y-1/2 w-48 max-h-[60vh] overflow-y-auto glass p-4 rounded-3xl z-40 custom-scrollbar animate-in slide-in-from-left duration-700">
+          <h3 className="text-[9px] font-black text-white/30 uppercase tracking-widest mb-3 border-b border-white/5 pb-2">Grounding Sources</h3>
+          <div className="flex flex-col gap-3">
+            {searchSources.slice(-8).map((src, i) => (
+              <a key={i} href={src.uri} target="_blank" rel="noopener noreferrer" className="flex flex-col group">
+                <span className="text-[10px] font-bold text-white/60 group-hover:text-white truncate transition-colors">{src.title || "Source"}</span>
+                <span className="text-[7px] font-mono text-white/20 truncate">{src.uri}</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
       <header className="w-full max-w-6xl flex items-center justify-between z-10 transition-opacity duration-1000" style={{ opacity: isSleeping ? 0.3 : 1 }}>
         <div className="flex flex-col">
           <span className="text-[12px] font-black tracking-[0.8em] text-white/40 uppercase drop-shadow-lg">NAIM / {VERSION}</span>
@@ -524,7 +589,7 @@ const App = () => {
                 </svg>
               </button>
               
-              <button onClick={() => { setIsSleeping(!isSleeping); setMultiplicity(1); setScaleFactor(1); if (!isSleeping) toggleCamera(false); }} className="px-16 py-6 glass text-white/60 hover:text-white rounded-full font-black text-[11px] tracking-[0.6em] uppercase hover:bg-white/10 transition-all border-white/10 shadow-2xl">
+              <button onClick={() => { setIsSleeping(!isSleeping); setMultiplicity(1); setScaleFactor(1); if (!isSleeping) toggleCamera(false); setSearchSources([]); }} className="px-16 py-6 glass text-white/60 hover:text-white rounded-full font-black text-[11px] tracking-[0.6em] uppercase hover:bg-white/10 transition-all border-white/10 shadow-2xl">
                 {isSleeping ? 'RE-SYNC' : 'HYBERNATE'}
               </button>
               
@@ -562,6 +627,14 @@ const App = () => {
         }
         .animate-hologram-flicker { animation: hologram-flicker 0.08s infinite; }
         .aurora { opacity: 0.2; filter: blur(120px); mix-blend-mode: screen; }
+
+        @keyframes slideInFromLeft {
+          0% { transform: translateY(-50%) translateX(-100%); opacity: 0; }
+          100% { transform: translateY(-50%) translateX(0); opacity: 1; }
+        }
+        .animate-in.slide-in-from-left {
+          animation: slideInFromLeft 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
       `}} />
     </div>
   );
