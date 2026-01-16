@@ -1,0 +1,8 @@
+{
+  "name": "Copy of NAIM - AI spraakchat",
+  "description": "De mooiste en meest geavanceerde spraak-AI ter wereld met vloeiende emoties en reactiviteit.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
